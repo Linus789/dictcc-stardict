@@ -14,6 +14,11 @@ def get_language_pair(input_file: str):
 
 class FieldParser:
     def __init__(self):
+        self._init_line_parser()
+        self._init_replace_abbreviations()
+        self._test_get_source_words()
+
+    def _init_line_parser(self):
         locMarker = pp.Empty().set_parse_action(lambda string, location, tokens: location)
         endlocMarker = locMarker.copy()
         endlocMarker.callPreparse = False
@@ -44,12 +49,57 @@ class FieldParser:
 
         brackets = round | square | curly | angle
         self.expr = pp.ZeroOrMore(word | brackets | pp.Suppress(pp.Word(" ")))
-        self.test_get_source_words()
+
+    def _init_replace_abbreviations(self):
+        # https://www.dict.cc/guidelines/
+        self.abbreviations_synonyms = {
+            "en": {
+                "sth.": {"something"},
+                "sb.": {"somebody"},
+                "sb.'s": {"somebody's"},
+                "sb./sth.": {"somebody", "something", "somebody/something"},
+            },
+            "de": {
+                "jd.": {"jemand"},
+                "jds.": {"jemandes"},
+                "jdm.": {"jemandem"},
+                "jdn.": {"jemanden"},
+                "etw.": {"etwas"},
+                "jd./etw.": {"jemand", "etwas", "jemand/etwas"},
+                "jds./etw.": {"jemandes", "etwas", "jemandes/etwas"},
+                "jdm./etw.": {"jemandem", "etwas", "jemandem/etwas"},
+                "jdn./etw.": {"jemanden", "etwas", "jemanden/etwas"},
+            },
+        }
+
+        self.find_abbreviations_exprs = {}
+
+        Abbreviation = self.abbreviation = namedtuple("Abbreviation", ["value"])
+        locMarker = pp.Empty().set_parse_action(lambda string, location, tokens: location)
+        endlocMarker = locMarker.copy()
+        endlocMarker.callPreparse = False
+
+        for lang, abbreviation_replacements in self.abbreviations_synonyms.items():
+            abbreviations = list(abbreviation_replacements.keys())
+
+            if not abbreviations:
+                continue
+
+            find_abbreviations_expr = pp.WordStart() + locMarker("start") + pp.Literal(abbreviations[0]) + pp.WordEnd() + endlocMarker("end")
+
+            for other_abbreviation in abbreviations[1:]:
+                find_abbreviations_expr = find_abbreviations_expr | (pp.WordStart() + locMarker("start") + pp.Literal(other_abbreviation) + pp.WordEnd() + endlocMarker("end"))
+
+            find_abbreviations_expr.setParseAction(lambda string, location, tokens: Abbreviation(value=string[tokens.start:tokens.end]))
+            find_abbreviations_expr = pp.ZeroOrMore(find_abbreviations_expr | pp.CharsNotIn("", exact=1))
+            find_abbreviations_expr.leave_whitespace()
+
+            self.find_abbreviations_exprs[lang] = find_abbreviations_expr
 
     def parse_tokens(self, s: str):
         return self.expr.parse_string(s)
 
-    def get_possible_source_words(self, field: str, word_class: str, lang: str, make_abbreviations_optional: bool = True):
+    def get_possible_source_words(self, field: str, word_class: str, lang: str, make_abbreviations_optional: bool = True, replace_abbreviations: bool = True):
         # Prepare abbreviations
         if make_abbreviations_optional:
             # https://www.dict.cc/guidelines/
@@ -134,27 +184,59 @@ class FieldParser:
         if source_words is None:
             source_words = set()
 
-        return {stripped for word in (source_words | finished_words) if (stripped := " ".join(word.split()))}
+        return_words = set()
+        source_words = {stripped for word in (source_words | finished_words) if (stripped := " ".join(word.split()))}
 
-    def test_get_source_words(self):
+        if replace_abbreviations and lang in self.find_abbreviations_exprs:
+            replacements_for_lang = self.abbreviations_synonyms[lang]
+            find_abbreviations_expr = self.find_abbreviations_exprs[lang]
+
+            for word in source_words:
+                split_word = find_abbreviations_expr.parse_string(word)
+                build_words = None
+
+                for sub_word in split_word:
+                    if type(sub_word) != self.abbreviation:
+                        if build_words is None:
+                            build_words = {sub_word}
+                        else:
+                            build_words = {f"{build_word}{sub_word}" for build_word in build_words}
+                    else:
+                        current_replacements = replacements_for_lang[sub_word.value] | {sub_word.value}
+
+                        if build_words is None:
+                            build_words = current_replacements
+                        else:
+                            build_words = {f"{build_word}{extra_word}" for build_word in build_words for extra_word in current_replacements}
+
+                if build_words is not None:
+                    return_words.update(build_words)
+        else:
+            return_words = source_words
+
+        return {stripped for word in return_words if (stripped := " ".join(word.split()))}
+
+    def _test_get_source_words(self):
         print("-> Running tests...")
         assert self.get_possible_source_words("(wait) for me", None, "en") == {"for me", "wait for me"}
         assert self.get_possible_source_words("for me (myself)", None, "en") == {"for me", "for me myself"}
         assert self.get_possible_source_words("(wait) for me (myself)", None, "en") == {"for me", "for me myself", "wait for me", "wait for me myself"}
         assert self.get_possible_source_words("to the detriment of", None, "en") == {"to the detriment of"}
         assert self.get_possible_source_words("to squirm", "verb", "en") == {"to squirm", "squirm"}
-        assert self.get_possible_source_words("to help sb.", "verb", "en") == {"to help", "help", "to help sb.", "help sb."}
-        assert self.get_possible_source_words("sth. is off", "verb", "en") == {"sth. is off", "is off"}
+        assert self.get_possible_source_words("to help sb.", "verb", "en") == {"to help", "help", "to help sb.", "help sb.", "to help somebody", "help somebody"}
+        assert self.get_possible_source_words("sth. is off", "verb", "en") == {"sth. is off", "something is off", "is off"}
         assert self.get_possible_source_words("(go) to see the match", "verb", "en") == {"go to see the match", "to see the match", "see the match"}
-        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en") == {"I think sb. is running", "sb. is running", "is running"}
-        assert self.get_possible_source_words("(I think) sb. is running after sb.", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "is running after"}
-        assert self.get_possible_source_words("(I think) sb. is running after sb. (right?)", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "is running after", "I think sb. is running after sb. right?", "sb. is running after sb. right?", "is running after sb. right?"}
-        assert self.get_possible_source_words("sb.", None, "en") == {"sb."}
-        assert self.get_possible_source_words("(go to) sb.", None, "en") == {"go to sb.", "go to", "sb."}
-        assert self.get_possible_source_words("(go) to sb.", "verb", "en") == {"go to sb.", "go to", "to sb.", "to", "sb."}
-        assert self.get_possible_source_words("(go) to sb.", None, "en") == {"go to sb.", "go to", "to sb.", "to"}
+        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en") == {"I think sb. is running", "sb. is running", "I think somebody is running", "somebody is running", "is running"}
+        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en") == {"I think sb. is running", "sb. is running", "I think somebody is running", "somebody is running", "is running"}
+        assert self.get_possible_source_words("(I think) sb. is running after sb.", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "I think somebody is running after sb.", "somebody is running after sb.", "I think sb. is running after somebody", "sb. is running after somebody", "I think somebody is running after somebody", "somebody is running after somebody", "is running after somebody", "I think somebody is running after", "somebody is running after", "is running after"}
+        assert self.get_possible_source_words("(I think) sb. is running after sb. (right?)", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "is running after", "I think sb. is running after sb. right?", "sb. is running after sb. right?", "is running after sb. right?", "I think somebody is running after sb.", "I think sb. is running after somebody", "I think somebody is running after somebody", "somebody is running after sb.", "sb. is running after somebody", "somebody is running after somebody", "is running after somebody", "I think somebody is running after", "somebody is running after", "is running after", "I think somebody is running after sb. right?", "I think sb. is running after somebody right?", "I think somebody is running after somebody right?", "somebody is running after sb. right?", "sb. is running after somebody right?", "somebody is running after somebody right?", "is running after somebody right?"}
+        assert self.get_possible_source_words("sb.", None, "en") == {"sb.", "somebody"}
+        assert self.get_possible_source_words("(go to) sb.", None, "en") == {"go to sb.", "go to somebody", "go to", "sb.", "somebody"}
+        assert self.get_possible_source_words("(go) to sb.", "verb", "en") == {"go to sb.", "go to somebody", "go to", "to sb.", "to somebody", "to", "sb.", "somebody"}
+        assert self.get_possible_source_words("(go) to sb.", None, "en") == {"go to sb.", "go to somebody", "go to", "to somebody", "to sb.", "to"}
         assert self.get_possible_source_words("to go to", None, "en") == {"to go to"}
         assert self.get_possible_source_words("to go to", "verb", "en") == {"to go to", "go to"}
+        assert self.get_possible_source_words("see sb./sth.", None, "en") == {"see sb./sth.", "see something", "see somebody", "see somebody/something", "see"}
 
 def main(input_file: str, from_lang: str):
     lang_pair = get_language_pair(input_file)
