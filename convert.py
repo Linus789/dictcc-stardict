@@ -44,27 +44,117 @@ class FieldParser:
 
         brackets = round | square | curly | angle
         self.expr = pp.ZeroOrMore(word | brackets | pp.Suppress(pp.Word(" ")))
+        self.test_get_source_words()
 
     def parse_tokens(self, s: str):
         return self.expr.parse_string(s)
 
-    def get_possible_source_words(self, field: str):
+    def get_possible_source_words(self, field: str, word_class: str, lang: str, make_abbreviations_optional: bool = True):
+        # Prepare abbreviations
+        if make_abbreviations_optional:
+            # https://www.dict.cc/guidelines/
+            optional_abbreviations = {
+                "en": {
+                    "any": {"start_or_end": {"sth.", "sb.", "sb.'s", "sb./sth."}},
+                    "verb": {"start": {"to"}},
+                },
+                "de": {
+                    "any": {"start_or_end": {"jd.", "jds.", "jdm.", "jdn.", "etw.", "jd./etw.", "jds./etw.", "jdm./etw.", "jdn./etw."}}
+                },
+            }
+
+            lang_abbreviations = optional_abbreviations.get(lang, {})
+            possible_abbreviations = lang_abbreviations.get("any", {})
+
+            for where, values in lang_abbreviations.get(word_class, {}).items():
+                if where in possible_abbreviations:
+                    possible_abbreviations[where].update(values)
+                else:
+                    possible_abbreviations[where] = values
+
+            if "start_or_end" in possible_abbreviations:
+                start_or_end_abbreviations = possible_abbreviations.pop("start_or_end")
+
+                if "start" in possible_abbreviations:
+                    possible_abbreviations["start"].update(start_or_end_abbreviations)
+                else:
+                    possible_abbreviations["start"] = start_or_end_abbreviations
+
+                if "end" in possible_abbreviations:
+                    possible_abbreviations["end"].update(start_or_end_abbreviations)
+                else:
+                    possible_abbreviations["end"] = start_or_end_abbreviations
+        else:
+            possible_abbreviations = {}
+
+        # Iterate over tokens
         tokens = self.parse_tokens(field)
         source_words = None
-        for token in tokens:
+        finished_words = set()
+        already_encountered_word = False
+        try:
+            last_word_index = [i for i, token in enumerate(tokens) if type(token) == self.word][-1]
+        except IndexError:
+            last_word_index = None
+
+        for index, token in enumerate(tokens):
+            if make_abbreviations_optional and possible_abbreviations and type(token) == self.word:
+                if index == last_word_index and token.value in possible_abbreviations.get("end", set()):
+                    if source_words is None:
+                        source_words = {token.value}
+                    else:
+                        finished_words |= set(source_words)
+                        source_words = {f"{word} {token.value}" for word in source_words}
+
+                    already_encountered_word = True
+                    continue
+
+                if not already_encountered_word and token.value in possible_abbreviations.get("start", set()):
+                    if source_words is None:
+                        source_words = {token.value, ""}
+                    else:
+                        source_words = {f"{word} {token.value}" for word in source_words} | {token.value, ""}
+
+                    already_encountered_word = True
+                    continue
+
             if type(token) == self.word:
                 if source_words is None:
                     source_words = {token.value}
                 else:
                     source_words = {f"{word} {token.value}" for word in source_words}
+
+                already_encountered_word = True
             elif type(token) == self.round:
                 if source_words is None:
                     source_words = {token.value, ""}
                 else:
                     source_words |= {f"{word} {token.value}" for word in source_words}
+
         if source_words is None:
-            return set()
-        return {stripped for word in source_words if (stripped := " ".join(word.split()))}
+            source_words = set()
+
+        return {stripped for word in (source_words | finished_words) if (stripped := " ".join(word.split()))}
+
+    def test_get_source_words(self):
+        print("-> Running tests...")
+        assert self.get_possible_source_words("(wait) for me", None, "en") == {"for me", "wait for me"}
+        assert self.get_possible_source_words("for me (myself)", None, "en") == {"for me", "for me myself"}
+        assert self.get_possible_source_words("(wait) for me (myself)", None, "en") == {"for me", "for me myself", "wait for me", "wait for me myself"}
+        assert self.get_possible_source_words("to the detriment of", None, "en") == {"to the detriment of"}
+        assert self.get_possible_source_words("to squirm", "verb", "en") == {"to squirm", "squirm"}
+        assert self.get_possible_source_words("to help sb.", "verb", "en") == {"to help", "help", "to help sb.", "help sb."}
+        assert self.get_possible_source_words("sth. is off", "verb", "en") == {"sth. is off", "is off"}
+        assert self.get_possible_source_words("(go) to see the match", "verb", "en") == {"go to see the match", "to see the match", "see the match"}
+        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en") == {"I think sb. is running", "sb. is running", "is running"}
+        assert self.get_possible_source_words("(I think) sb. is running after sb.", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "is running after"}
+        assert self.get_possible_source_words("(I think) sb. is running after sb. (right?)", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "is running after", "I think sb. is running after sb. right?", "sb. is running after sb. right?", "is running after sb. right?"}
+        assert self.get_possible_source_words("sb.", None, "en") == {"sb."}
+        assert self.get_possible_source_words("(go to) sb.", None, "en") == {"go to sb.", "go to", "sb."}
+        assert self.get_possible_source_words("(go) to sb.", "verb", "en") == {"go to sb.", "go to", "to sb.", "to", "sb."}
+        assert self.get_possible_source_words("(go) to sb.", None, "en") == {"go to sb.", "go to", "to sb.", "to"}
+        assert self.get_possible_source_words("to go to", None, "en") == {"to go to"}
+        assert self.get_possible_source_words("to go to", "verb", "en") == {"to go to", "go to"}
 
 def main(input_file: str, from_lang: str):
     lang_pair = get_language_pair(input_file)
@@ -105,12 +195,13 @@ def main(input_file: str, from_lang: str):
             if line[0] == "#":
                 continue
 
-            fields = line.split("\t")[:2]
+            fields = line.split("\t")
 
             if len(fields) < 2:
                 continue
 
-            src, target = [unicodedata.normalize("NFC", html.unescape(field)) for field in fields]
+            src, target = [unicodedata.normalize("NFC", html.unescape(field)) for field in fields[:2]]
+            word_class = fields[2].strip().lower() if 2 < len(fields) else None
 
             if inverse_langs:
                 src, target = target, src
@@ -120,7 +211,7 @@ def main(input_file: str, from_lang: str):
             if not target:
                 continue
 
-            for possible_source_word in field_parser.get_possible_source_words(src):
+            for possible_source_word in field_parser.get_possible_source_words(src, word_class, from_lang):
                 dictionary[possible_source_word].append(target)
         print()
 
