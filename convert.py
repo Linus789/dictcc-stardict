@@ -1,16 +1,29 @@
 #!/usr/bin/env python
 from pyglossary.glossary import Glossary
 import pyparsing as pp
+from dataclasses import dataclass
 from collections import namedtuple
 from collections import defaultdict
+from datetime import date
 import html
 import unicodedata
-from datetime import date
 import os
+from typing import List, Tuple
 
 def get_language_pair(input_file: str):
     with open(input_file) as f:
         return f.readline().removeprefix("#").strip().split()[0].lower()
+
+@dataclass(eq=False)
+class SourceWord:
+    word: str
+    has_replacements: bool
+
+    def __hash__(self):
+        return hash(self.word)
+
+    def __eq__(self, other):
+        return self.word == other.word
 
 class FieldParser:
     def __init__(self):
@@ -99,7 +112,7 @@ class FieldParser:
     def parse_tokens(self, s: str):
         return self.expr.parse_string(s)
 
-    def get_possible_source_words(self, field: str, word_class: str, lang: str, make_abbreviations_optional: bool = True, replace_abbreviations: bool = True):
+    def get_possible_source_words(self, field: str, word_class: str, lang: str, make_abbreviations_optional: bool = True, replace_abbreviations: bool = True, as_str: bool = False):
         # Prepare abbreviations
         if make_abbreviations_optional:
             # https://www.dict.cc/guidelines/
@@ -198,45 +211,56 @@ class FieldParser:
                 for sub_word in split_word:
                     if type(sub_word) != self.abbreviation:
                         if build_words is None:
-                            build_words = {sub_word}
+                            build_words = {SourceWord(sub_word, False)}
                         else:
-                            build_words = {f"{build_word}{sub_word}" for build_word in build_words}
+                            for build_word in build_words:
+                                build_word.word = f"{build_word.word}{sub_word}"
                     else:
-                        current_replacements = replacements_for_lang[sub_word.value] | {sub_word.value}
+                        current_replacements = list(map(lambda x: (x, True), replacements_for_lang[sub_word.value])) + [(sub_word.value, False)]
 
                         if build_words is None:
-                            build_words = current_replacements
+                            build_words = {SourceWord(replacement, is_replacement) for replacement, is_replacement in current_replacements}
                         else:
-                            build_words = {f"{build_word}{extra_word}" for build_word in build_words for extra_word in current_replacements}
+                            old_build_words = set(build_words)
+                            build_words.clear()
+
+                            for build_word in old_build_words:
+                                for replacement, is_replacement in current_replacements:
+                                    build_words.add(SourceWord(f"{build_word.word}{replacement}", build_word.has_replacements or is_replacement))
 
                 if build_words is not None:
                     return_words.update(build_words)
         else:
             return_words = source_words
 
-        return {stripped for word in return_words if (stripped := " ".join(word.split()))}
+        for word in return_words:
+            word.word = " ".join(word.word.split())
+
+        return {word.word if as_str else word for word in return_words if word.word}
 
     def _test_get_source_words(self):
         print("-> Running tests...")
-        assert self.get_possible_source_words("(wait) for me", None, "en") == {"for me", "wait for me"}
-        assert self.get_possible_source_words("for me (myself)", None, "en") == {"for me", "for me myself"}
-        assert self.get_possible_source_words("(wait) for me (myself)", None, "en") == {"for me", "for me myself", "wait for me", "wait for me myself"}
-        assert self.get_possible_source_words("to the detriment of", None, "en") == {"to the detriment of"}
-        assert self.get_possible_source_words("to squirm", "verb", "en") == {"to squirm", "squirm"}
-        assert self.get_possible_source_words("to help sb.", "verb", "en") == {"to help", "help", "to help sb.", "help sb.", "to help somebody", "help somebody"}
-        assert self.get_possible_source_words("sth. is off", "verb", "en") == {"sth. is off", "something is off", "is off"}
-        assert self.get_possible_source_words("(go) to see the match", "verb", "en") == {"go to see the match", "to see the match", "see the match"}
-        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en") == {"I think sb. is running", "sb. is running", "I think somebody is running", "somebody is running", "is running"}
-        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en") == {"I think sb. is running", "sb. is running", "I think somebody is running", "somebody is running", "is running"}
-        assert self.get_possible_source_words("(I think) sb. is running after sb.", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "I think somebody is running after sb.", "somebody is running after sb.", "I think sb. is running after somebody", "sb. is running after somebody", "I think somebody is running after somebody", "somebody is running after somebody", "is running after somebody", "I think somebody is running after", "somebody is running after", "is running after"}
-        assert self.get_possible_source_words("(I think) sb. is running after sb. (right?)", "verb", "en") == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "is running after", "I think sb. is running after sb. right?", "sb. is running after sb. right?", "is running after sb. right?", "I think somebody is running after sb.", "I think sb. is running after somebody", "I think somebody is running after somebody", "somebody is running after sb.", "sb. is running after somebody", "somebody is running after somebody", "is running after somebody", "I think somebody is running after", "somebody is running after", "is running after", "I think somebody is running after sb. right?", "I think sb. is running after somebody right?", "I think somebody is running after somebody right?", "somebody is running after sb. right?", "sb. is running after somebody right?", "somebody is running after somebody right?", "is running after somebody right?"}
-        assert self.get_possible_source_words("sb.", None, "en") == {"sb.", "somebody"}
-        assert self.get_possible_source_words("(go to) sb.", None, "en") == {"go to sb.", "go to somebody", "go to", "sb.", "somebody"}
-        assert self.get_possible_source_words("(go) to sb.", "verb", "en") == {"go to sb.", "go to somebody", "go to", "to sb.", "to somebody", "to", "sb.", "somebody"}
-        assert self.get_possible_source_words("(go) to sb.", None, "en") == {"go to sb.", "go to somebody", "go to", "to somebody", "to sb.", "to"}
-        assert self.get_possible_source_words("to go to", None, "en") == {"to go to"}
-        assert self.get_possible_source_words("to go to", "verb", "en") == {"to go to", "go to"}
-        assert self.get_possible_source_words("see sb./sth.", None, "en") == {"see sb./sth.", "see something", "see somebody", "see somebody/something", "see"}
+        assert self.get_possible_source_words("(wait) for me", None, "en", as_str=True) == {"for me", "wait for me"}
+        assert self.get_possible_source_words("for me (myself)", None, "en", as_str=True) == {"for me", "for me myself"}
+        assert self.get_possible_source_words("(wait) for me (myself)", None, "en", as_str=True) == {"for me", "for me myself", "wait for me", "wait for me myself"}
+        assert self.get_possible_source_words("to the detriment of", None, "en", as_str=True) == {"to the detriment of"}
+        assert self.get_possible_source_words("to squirm", "verb", "en", as_str=True) == {"to squirm", "squirm"}
+        assert self.get_possible_source_words("to help sb.", "verb", "en", as_str=True) == {"to help", "help", "to help sb.", "help sb.", "to help somebody", "help somebody"}
+        assert self.get_possible_source_words("sth. is off", "verb", "en", as_str=True) == {"sth. is off", "something is off", "is off"}
+        assert self.get_possible_source_words("(go) to see the match", "verb", "en", as_str=True) == {"go to see the match", "to see the match", "see the match"}
+        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en", as_str=True) == {"I think sb. is running", "sb. is running", "I think somebody is running", "somebody is running", "is running"}
+        assert self.get_possible_source_words("(I think) sb. is running", "verb", "en", as_str=True) == {"I think sb. is running", "sb. is running", "I think somebody is running", "somebody is running", "is running"}
+        assert self.get_possible_source_words("(I think) sb. is running after sb.", "verb", "en", as_str=True) == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "I think somebody is running after sb.", "somebody is running after sb.", "I think sb. is running after somebody", "sb. is running after somebody", "I think somebody is running after somebody", "somebody is running after somebody", "is running after somebody", "I think somebody is running after", "somebody is running after", "is running after"}
+        assert self.get_possible_source_words("(I think) sb. is running after sb. (right?)", "verb", "en", as_str=True) == {"I think sb. is running after sb.", "sb. is running after sb.", "is running after sb.", "I think sb. is running after", "sb. is running after", "is running after", "I think sb. is running after sb. right?", "sb. is running after sb. right?", "is running after sb. right?", "I think somebody is running after sb.", "I think sb. is running after somebody", "I think somebody is running after somebody", "somebody is running after sb.", "sb. is running after somebody", "somebody is running after somebody", "is running after somebody", "I think somebody is running after", "somebody is running after", "is running after", "I think somebody is running after sb. right?", "I think sb. is running after somebody right?", "I think somebody is running after somebody right?", "somebody is running after sb. right?", "sb. is running after somebody right?", "somebody is running after somebody right?", "is running after somebody right?"}
+        assert self.get_possible_source_words("sb.", None, "en", as_str=True) == {"sb.", "somebody"}
+        assert self.get_possible_source_words("(go to) sb.", None, "en", as_str=True) == {"go to sb.", "go to somebody", "go to", "sb.", "somebody"}
+        assert self.get_possible_source_words("(go) to sb.", "verb", "en", as_str=True) == {"go to sb.", "go to somebody", "go to", "to sb.", "to somebody", "to", "sb.", "somebody"}
+        assert self.get_possible_source_words("(go) to sb.", None, "en", as_str=True) == {"go to sb.", "go to somebody", "go to", "to somebody", "to sb.", "to"}
+        assert self.get_possible_source_words("to go to", None, "en", as_str=True) == {"to go to"}
+        assert self.get_possible_source_words("to go to", "verb", "en", as_str=True) == {"to go to", "go to"}
+        assert self.get_possible_source_words("(sb.) could help", None, "en", as_str=True) == {"could help", "sb. could help", "somebody could help"}
+        assert self.get_possible_source_words("see sb./sth.", None, "en", as_str=True) == {"see sb./sth.", "see something", "see somebody", "see somebody/something", "see"}
+        assert self.get_possible_source_words("see sb.", None, "en") == {SourceWord("see sb.", False), SourceWord("see", False), SourceWord("see somebody", True)}
 
 def main(input_file: str, from_lang: str):
     lang_pair = get_language_pair(input_file)
@@ -260,8 +284,13 @@ def main(input_file: str, from_lang: str):
     except FileExistsError:
         pass
 
+    @dataclass(eq=False)
+    class DictEntry:
+        translations: List[Tuple[str, str]]
+        source_word_is_replacement: bool | None
+
     field_parser = FieldParser()
-    dictionary = defaultdict(lambda: [])
+    dictionary = defaultdict(lambda: DictEntry([], None))
 
     with open(input_file) as input_file:
         num_lines = len(input_file.readlines())
@@ -294,15 +323,49 @@ def main(input_file: str, from_lang: str):
                 continue
 
             for possible_source_word in field_parser.get_possible_source_words(src, word_class, from_lang):
-                dictionary[possible_source_word].append(target)
+                entry = dictionary[possible_source_word.word]
+                entry.translations.append((word_class, target))
+
+                if entry.source_word_is_replacement is None:
+                    entry.source_word_is_replacement = possible_source_word.has_replacements
+                else:
+                    entry.source_word_is_replacement = entry.source_word_is_replacement or possible_source_word.has_replacements
         print()
 
     dictionary_num_entries = len(dictionary)
     translations_to_source_words = defaultdict(lambda: set())
 
-    for index, (src, translations) in enumerate(dictionary.items(), start=1):
+    for index, (src, entry) in enumerate(dictionary.items(), start=1):
         print(f"\r-> Eliminating duplicates {index}/{dictionary_num_entries}", end="")
-        translations_to_source_words[tuple(translations)].add(src)
+        translation_to_word_class = {}
+
+        for word_class, translation in entry.translations:
+            if translation in translation_to_word_class:
+                if not word_class:
+                    continue
+                else:
+                    its_word_class = translation_to_word_class[translation]
+
+                    if not its_word_class:
+                        translation_to_word_class[translation] = word_class
+            else:
+                translation_to_word_class[translation] = word_class
+
+        for translation, word_class in translation_to_word_class.items():
+            if word_class == "adj":
+                word_class = 0
+            elif word_class == "verb":
+                word_class = 1
+            elif word_class == "noun":
+                word_class = 2
+            else:
+                word_class = 3
+
+            translation_to_word_class[translation] = word_class
+
+        translations = sorted(translation_to_word_class.items(), key=lambda x: (x[1], x[0].lower(), x[0]))
+        translations = tuple(map(lambda x: x[0], translations))
+        translations_to_source_words[translations].add((src, entry.source_word_is_replacement))
     print()
 
     Glossary.init()
@@ -311,17 +374,18 @@ def main(input_file: str, from_lang: str):
     translations_num_entries = len(translations_to_source_words)
     for index, (translations, src_words) in enumerate(translations_to_source_words.items(), start=1):
         print(f"\r-> Creating entry {index}/{translations_num_entries}", end="")
-        longest_src_word = sorted(src_words, key=lambda x: -len(x))[0]
-        src_words.remove(longest_src_word)
+        longest_src_word_without_replacements = sorted(src_words, key=lambda x: (x[1], -len(x[0])))[0]
+        src_words.remove(longest_src_word_without_replacements)
+        longest_src_word_without_replacements = longest_src_word_without_replacements[0]
         definition = "<ol>" + ''.join([f"<li>{translation}</li>" for translation in translations]) + "</ol>"
 
         entry = glossary.newEntry(
-            longest_src_word,
+            longest_src_word_without_replacements,
             definition,
             defiFormat="h",  # "m" for plain text, "h" for HTML
         )
 
-        for other_src_word in src_words:
+        for other_src_word, _ in src_words:
             entry.addAlt(other_src_word)
 
         glossary.addEntryObj(entry)
