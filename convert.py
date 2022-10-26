@@ -230,11 +230,11 @@ class FieldParser:
 
                 if build_words is not None:
                     return_words.update(build_words)
-        else:
-            return_words = source_words
 
-        for word in return_words:
-            word.word = " ".join(word.word.split())
+            for word in return_words:
+                word.word = " ".join(word.word.split())
+        else:
+            return_words = {SourceWord(word, False) for word in source_words}
 
         return {word.word if as_str else word for word in return_words if word.word}
 
