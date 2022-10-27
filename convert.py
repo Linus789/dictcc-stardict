@@ -377,7 +377,7 @@ def main(input_file: str, from_lang: str):
         longest_src_word_without_replacements = sorted(src_words, key=lambda x: (x[1], -len(x[0])))[0]
         src_words.remove(longest_src_word_without_replacements)
         longest_src_word_without_replacements = longest_src_word_without_replacements[0]
-        definition = "<ol>" + ''.join([f"<li>{translation}</li>" for translation in translations]) + "</ol>"
+        definition = "<ol>" + ''.join([f"<li>{html.escape(translation)}</li>" for translation in translations]) + "</ol>"
 
         entry = glossary.newEntry(
             longest_src_word_without_replacements,
