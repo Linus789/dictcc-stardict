@@ -11,7 +11,7 @@ import os
 from typing import List, Tuple
 
 def get_language_pair(input_file: str):
-    with open(input_file) as f:
+    with open(input_file, encoding="utf-8") as f:
         return f.readline().removeprefix("#").strip().split()[0].lower()
 
 @dataclass(eq=False)
@@ -292,7 +292,7 @@ def main(input_file: str, from_lang: str):
     field_parser = FieldParser()
     dictionary = defaultdict(lambda: DictEntry([], None))
 
-    with open(input_file) as input_file:
+    with open(input_file, encoding="utf-8") as input_file:
         num_lines = len(input_file.readlines())
         input_file.seek(0)
 
